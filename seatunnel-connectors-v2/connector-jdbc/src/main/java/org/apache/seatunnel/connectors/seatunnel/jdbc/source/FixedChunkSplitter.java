@@ -43,6 +43,7 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Time;
 import java.sql.Timestamp;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -81,6 +82,9 @@ public class FixedChunkSplitter extends ChunkSplitter {
             } else {
                 return createStringColumnSplits(table, splitKeyName, splitKeyType);
             }
+        }
+        if (SqlType.DATE.equals(splitKeyType.getSqlType())) {
+            return getJdbcSourceDateSplits(table, splitKeyName, splitKeyType);
         }
         return getJdbcSourceSplits(table, splitKeyName, splitKeyType);
     }
@@ -159,6 +163,58 @@ public class FixedChunkSplitter extends ChunkSplitter {
                                                 radix,
                                                 collationSequence)));
                 index++;
+            }
+            return result;
+        }
+        return numberColumnSplits;
+    }
+
+    private Collection<JdbcSourceSplit> getJdbcSourceDateSplits(
+            JdbcSourceTable table, String splitKeyName, SeaTunnelDataType splitKeyType)
+            throws SQLException {
+        Date partitionStart = null;
+        Date partitionEnd = null;
+        if (StringUtils.isNotBlank(table.getPartitionStart())) {
+            partitionStart = Date.valueOf(table.getPartitionStart());
+        }
+        if (StringUtils.isNotBlank(table.getPartitionEnd())) {
+            partitionEnd = Date.valueOf(table.getPartitionEnd());
+        }
+        if (partitionStart == null || partitionEnd == null) {
+            Pair<Object, Object> range = queryMinMax(table, splitKeyName);
+            Object min = range.getLeft();
+            Object max = range.getRight();
+            if (min == null || max == null) {
+                JdbcSourceSplit split = createSingleSplit(table);
+                return Collections.singletonList(split);
+            }
+            partitionStart = toSqlDate(min);
+            partitionEnd = toSqlDate(max);
+        }
+
+        BigDecimal partitionStartEpochDay =
+                BigDecimal.valueOf(partitionStart.toLocalDate().toEpochDay());
+        BigDecimal partitionEndEpochDay =
+                BigDecimal.valueOf(partitionEnd.toLocalDate().toEpochDay());
+        Collection<JdbcSourceSplit> numberColumnSplits =
+                createNumberColumnSplits(
+                        table,
+                        splitKeyName,
+                        splitKeyType,
+                        partitionStartEpochDay,
+                        partitionEndEpochDay);
+        if (CollectionUtils.isNotEmpty(numberColumnSplits)) {
+            List<JdbcSourceSplit> result = new ArrayList<>();
+            for (JdbcSourceSplit split : numberColumnSplits) {
+                result.add(
+                        new JdbcSourceSplit(
+                                split.getTablePath(),
+                                split.getSplitId(),
+                                split.getSplitQuery(),
+                                split.getSplitKeyName(),
+                                split.getSplitKeyType(),
+                                toSqlDateByEpochDay(split.getSplitStart()),
+                                toSqlDateByEpochDay(split.getSplitEnd())));
             }
             return result;
         }
@@ -371,6 +427,31 @@ public class FixedChunkSplitter extends ChunkSplitter {
             max = convertToBigDecimal(max);
         }
         return Pair.of(((BigDecimal) min), ((BigDecimal) max));
+    }
+
+    private Date toSqlDate(Object value) {
+        if (value instanceof Date) {
+            return (Date) value;
+        }
+        if (value instanceof Timestamp) {
+            return Date.valueOf(((Timestamp) value).toLocalDateTime().toLocalDate());
+        }
+        throw new JdbcConnectorException(
+                CommonErrorCodeDeprecated.UNSUPPORTED_DATA_TYPE,
+                "Unsupported date split type: " + value.getClass());
+    }
+
+    private Date toSqlDateByEpochDay(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (!(value instanceof BigDecimal)) {
+            throw new JdbcConnectorException(
+                    CommonErrorCodeDeprecated.UNSUPPORTED_DATA_TYPE,
+                    "Unsupported date split boundary type: " + value.getClass());
+        }
+        long epochDay = ((BigDecimal) value).longValue();
+        return Date.valueOf(LocalDate.ofEpochDay(epochDay));
     }
 
     private BigDecimal convertToBigDecimal(Object o) {
