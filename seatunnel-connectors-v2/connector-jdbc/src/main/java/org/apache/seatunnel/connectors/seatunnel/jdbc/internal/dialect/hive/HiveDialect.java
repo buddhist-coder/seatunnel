@@ -49,6 +49,21 @@ public class HiveDialect implements JdbcDialect {
     }
 
     @Override
+    public String hashModForField(String nativeType, String fieldName, int mod) {
+        String quotedFieldName = quoteIdentifier(fieldName);
+        if (nativeType != null && !nativeType.isEmpty()) {
+            quotedFieldName = convertType(quotedFieldName, nativeType);
+        }
+        // Hive supports hash + pmod for bucket split and pmod keeps result in [0, mod).
+        return "pmod(hash(coalesce(cast(" + quotedFieldName + " as string), ''))," + mod + ")";
+    }
+
+    @Override
+    public String hashModForField(String fieldName, int mod) {
+        return hashModForField(null, fieldName, mod);
+    }
+
+    @Override
     public Optional<String> getUpsertStatement(
             String database, String tableName, String[] fieldNames, String[] uniqueKeyFields) {
         return Optional.empty();
