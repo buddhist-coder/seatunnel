@@ -51,6 +51,7 @@ public class SFTPFileSystem extends FileSystem {
 
     private SFTPConnectionPool connectionPool;
     private URI uri;
+    private final String fileSystemInstanceId = Integer.toHexString(System.identityHashCode(this));
 
     private static final int DEFAULT_SFTP_PORT = 22;
     public static final int DEFAULT_MAX_CONNECTION = 5;
@@ -115,7 +116,15 @@ public class SFTPFileSystem extends FileSystem {
         }
 
         int connectionMax = conf.getInt(FS_SFTP_CONNECTION_MAX, DEFAULT_MAX_CONNECTION);
-        connectionPool = new SFTPConnectionPool(connectionMax, connectionMax);
+        connectionPool = new SFTPConnectionPool(connectionMax);
+        LOG.info(
+                "Initialized SFTPFileSystem[{}] with pool[{}], host={}, port={}, user={}, connectionMax={}",
+                fileSystemInstanceId,
+                getPoolInstanceId(),
+                host,
+                port,
+                user,
+                connectionMax);
     }
 
     private ChannelSftp connect() throws IOException {
@@ -127,13 +136,64 @@ public class SFTPFileSystem extends FileSystem {
         String pwd = conf.get(FS_SFTP_PASSWORD_PREFIX + host + "." + user, null);
         String keyFile = conf.get(FS_SFTP_KEYFILE, null);
 
+        LOG.debug(
+                "SFTPFileSystem[{}] request connection from pool[{}], caller={}, trackedConnections={}, idleConnections={}, liveConnections={}",
+                fileSystemInstanceId,
+                getPoolInstanceId(),
+                resolveConnectCaller(),
+                connectionPool == null ? -1 : connectionPool.getConnPoolSize(),
+                connectionPool == null ? -1 : connectionPool.getIdleCount(),
+                connectionPool == null ? -1 : connectionPool.getLiveConnCount());
         ChannelSftp channel = connectionPool.connect(host, port, user, pwd, keyFile);
 
         return channel;
     }
 
     private void disconnect(ChannelSftp channel) throws IOException {
+        LOG.debug(
+                "SFTPFileSystem[{}] release channel[{}] to pool[{}], caller={}, trackedConnections={}, idleConnections={}, liveConnections={}",
+                fileSystemInstanceId,
+                getChannelInstanceId(channel),
+                getPoolInstanceId(),
+                resolveDisconnectCaller(),
+                connectionPool == null ? -1 : connectionPool.getConnPoolSize(),
+                connectionPool == null ? -1 : connectionPool.getIdleCount(),
+                connectionPool == null ? -1 : connectionPool.getLiveConnCount());
         connectionPool.disconnect(channel);
+    }
+
+    private String getPoolInstanceId() {
+        return connectionPool == null ? "null" : Integer.toHexString(System.identityHashCode(connectionPool));
+    }
+
+    private String getChannelInstanceId(ChannelSftp channel) {
+        return channel == null ? "null" : Integer.toHexString(System.identityHashCode(channel));
+    }
+
+    private String resolveConnectCaller() {
+        return resolveCaller("connect");
+    }
+
+    private String resolveDisconnectCaller() {
+        return resolveCaller("disconnect");
+    }
+
+    private String resolveCaller(String methodName) {
+        StackTraceElement[] stackTrace = Thread.currentThread().getStackTrace();
+        for (StackTraceElement element : stackTrace) {
+            if (Thread.class.getName().equals(element.getClassName())) {
+                continue;
+            }
+            if (SFTPFileSystem.class.getName().equals(element.getClassName())
+                    && ("resolveCaller".equals(element.getMethodName())
+                            || "resolveConnectCaller".equals(element.getMethodName())
+                            || "resolveDisconnectCaller".equals(element.getMethodName())
+                            || methodName.equals(element.getMethodName()))) {
+                continue;
+            }
+            return element.getClassName() + "#" + element.getMethodName() + ":" + element.getLineNumber();
+        }
+        return "unknown";
     }
 
     private Path makeAbsolute(Path workDir, Path path) {

@@ -31,7 +31,9 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 public class SFTPConnectionPool {
 
@@ -47,9 +49,9 @@ public class SFTPConnectionPool {
     private HashMap<ChannelSftp, ConnectionInfo> con2infoMap =
             new HashMap<ChannelSftp, ConnectionInfo>();
 
-    SFTPConnectionPool(int maxConnection, int liveConnectionCount) {
+    SFTPConnectionPool(int maxConnection) {
         this.maxConnection = maxConnection;
-        this.liveConnectionCount = liveConnectionCount;
+        this.liveConnectionCount = 0;
     }
 
     synchronized ChannelSftp getFromPool(ConnectionInfo info) throws IOException {
@@ -60,12 +62,30 @@ public class SFTPConnectionPool {
             Iterator<ChannelSftp> it = cons.iterator();
             if (it.hasNext()) {
                 channel = it.next();
-                idleConnections.remove(info);
+                it.remove();
+                if (cons.isEmpty()) {
+                    idleConnections.remove(info);
+                }
+                LOG.debug(
+                        "SFTP connection pool[{}] HIT for {}, channel[{}], trackedConnections={}, idleConnections={}, liveConnections={}",
+                        getPoolInstanceId(),
+                        formatConnectionInfo(info),
+                        getChannelInstanceId(channel),
+                        getConnPoolSize(),
+                        getIdleCount(),
+                        getLiveConnCount());
                 return channel;
             } else {
                 throw new IOException("Connection pool error.");
             }
         }
+        LOG.info(
+                "SFTP connection pool[{}] MISS for {}, trackedConnections={}, idleConnections={}, liveConnections={}",
+                getPoolInstanceId(),
+                formatConnectionInfo(info),
+                getConnPoolSize(),
+                getIdleCount(),
+                getLiveConnCount());
         return null;
     }
 
@@ -77,6 +97,14 @@ public class SFTPConnectionPool {
             idleConnections.put(info, cons);
         }
         cons.add(channel);
+        LOG.debug(
+                "SFTP connection pool[{}] RETURN channel[{}] for {}, trackedConnections={}, idleConnections={}, liveConnections={}",
+                getPoolInstanceId(),
+                getChannelInstanceId(channel),
+                formatConnectionInfo(info),
+                getConnPoolSize(),
+                getIdleCount(),
+                getLiveConnCount());
     }
 
     /** Shutdown the connection pool and close all open connections. */
@@ -123,19 +151,30 @@ public class SFTPConnectionPool {
 
         if (channel != null) {
             if (channel.isConnected()) {
+                LOG.debug(
+                        "Reusing pooled SFTP connection from pool[{}], channel[{}], target={}",
+                        getPoolInstanceId(),
+                        getChannelInstanceId(channel),
+                        formatConnectionInfo(info));
                 return channel;
             } else {
-                channel = null;
+                LOG.warn(
+                        "SFTP connection pool[{}] found disconnected channel[{}] for {}, will create a new connection",
+                        getPoolInstanceId(),
+                        getChannelInstanceId(channel),
+                        formatConnectionInfo(info));
                 synchronized (this) {
                     --liveConnectionCount;
                     con2infoMap.remove(channel);
                 }
+                channel = null;
             }
         }
 
         // create a new connection and add to pool
         JSch jsch = new JSch();
         Session session = null;
+        long connectionStartNanos = System.nanoTime();
         try {
             if (user == null || user.length() == 0) {
                 user = System.getProperty("user.name");
@@ -161,24 +200,52 @@ public class SFTPConnectionPool {
             config.put("StrictHostKeyChecking", "no");
             session.setConfig(config);
 
-            session.connect();
+            session.connect(30000);
             channel = (ChannelSftp) session.openChannel("sftp");
-            channel.connect();
+            channel.connect(30000);
 
             synchronized (this) {
                 con2infoMap.put(channel, info);
                 liveConnectionCount++;
             }
 
+            long elapsedMillis = getElapsedMillis(connectionStartNanos);
+            LOG.info(
+                    "Created new SFTP connection from pool[{}] to {}, channel[{}], trackedConnections={}, idleConnections={}, liveConnections={}, cost {} ms ({} s)",
+                    getPoolInstanceId(),
+                    formatConnectionInfo(info),
+                    getChannelInstanceId(channel),
+                    getConnPoolSize(),
+                    getIdleCount(),
+                    getLiveConnCount(),
+                    elapsedMillis,
+                    formatElapsedSeconds(elapsedMillis));
             return channel;
 
         } catch (JSchException e) {
+            long elapsedMillis = getElapsedMillis(connectionStartNanos);
+            LOG.warn(
+                    "Create new SFTP connection from pool[{}] to {} failed after {} ms ({} s)",
+                    getPoolInstanceId(),
+                    formatConnectionInfo(info),
+                    elapsedMillis,
+                    formatElapsedSeconds(elapsedMillis),
+                    e);
             throw new IOException(StringUtils.stringifyException(e));
         }
     }
 
+    private long getElapsedMillis(long startNanos) {
+        return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+    }
+
+    private String formatElapsedSeconds(long elapsedMillis) {
+        return String.format(Locale.ROOT, "%.3f", elapsedMillis / 1000.0d);
+    }
+
     void disconnect(ChannelSftp channel) throws IOException {
         if (channel != null) {
+            ConnectionInfo info = con2infoMap.get(channel);
             // close connection if too many active connections
             boolean closeConnection = false;
             synchronized (this) {
@@ -198,6 +265,14 @@ public class SFTPConnectionPool {
                         throw new IOException(StringUtils.stringifyException(e));
                     }
                 }
+                LOG.info(
+                        "SFTP connection pool[{}] CLOSE channel[{}] for {}, trackedConnections={}, idleConnections={}, liveConnections={}",
+                        getPoolInstanceId(),
+                        getChannelInstanceId(channel),
+                        formatConnectionInfo(info),
+                        getConnPoolSize(),
+                        getIdleCount(),
+                        getLiveConnCount());
 
             } else {
                 returnToPool(channel);
@@ -205,8 +280,27 @@ public class SFTPConnectionPool {
         }
     }
 
+    private String getPoolInstanceId() {
+        return Integer.toHexString(System.identityHashCode(this));
+    }
+
+    private String getChannelInstanceId(ChannelSftp channel) {
+        return channel == null ? "null" : Integer.toHexString(System.identityHashCode(channel));
+    }
+
+    private String formatConnectionInfo(ConnectionInfo info) {
+        if (info == null) {
+            return "unknown";
+        }
+        return info.getHost() + ":" + info.getPort() + " as user " + info.getUser();
+    }
+
     public int getIdleCount() {
-        return this.idleConnections.size();
+        int idleCount = 0;
+        for (Set<ChannelSftp> channels : this.idleConnections.values()) {
+            idleCount += channels.size();
+        }
+        return idleCount;
     }
 
     public int getLiveConnCount() {
