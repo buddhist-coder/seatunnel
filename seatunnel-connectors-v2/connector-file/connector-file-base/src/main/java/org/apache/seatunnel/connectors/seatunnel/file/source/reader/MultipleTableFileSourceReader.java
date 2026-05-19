@@ -61,7 +61,7 @@ public class MultipleTableFileSourceReader implements SourceReader<SeaTunnelRow,
                                                         .getTableId()
                                                         .toTablePath()
                                                         .toString(),
-                                        BaseFileSourceConfig::getReadStrategy));
+                                        BaseFileSourceConfig::createReadStrategy));
     }
 
     @Override

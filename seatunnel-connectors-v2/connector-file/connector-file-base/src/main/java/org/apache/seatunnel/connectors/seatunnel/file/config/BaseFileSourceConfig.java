@@ -60,13 +60,44 @@ public abstract class BaseFileSourceConfig implements Serializable {
     public BaseFileSourceConfig(ReadonlyConfig readonlyConfig) {
         this.baseFileSourceConfig = readonlyConfig;
         this.fileFormat = readonlyConfig.get(FileBaseSourceOptions.FILE_FORMAT_TYPE);
-        this.readStrategy = ReadStrategyFactory.of(readonlyConfig, getHadoopConfig());
-        this.filePaths = parseFilePaths(readonlyConfig);
-
-        this.catalogTable = parseCatalogTable(readonlyConfig);
+        ReadStrategy probeReadStrategy = ReadStrategyFactory.of(readonlyConfig, getHadoopConfig());
+        List<String> discoveredFilePaths;
+        CatalogTable discoveredCatalogTable;
+        try {
+            discoveredFilePaths = parseFilePaths(readonlyConfig, probeReadStrategy);
+            discoveredCatalogTable =
+                    parseCatalogTable(readonlyConfig, probeReadStrategy, discoveredFilePaths);
+        } finally {
+            closeReadStrategyQuietly(probeReadStrategy);
+        }
+        this.filePaths = discoveredFilePaths;
+        this.catalogTable = discoveredCatalogTable;
+        this.readStrategy = createReadStrategyPrototype(readonlyConfig, discoveredCatalogTable);
     }
 
-    private List<String> parseFilePaths(ReadonlyConfig readonlyConfig) {
+    public ReadStrategy createReadStrategy() {
+        ReadStrategy runtimeReadStrategy =
+                ReadStrategyFactory.of(baseFileSourceConfig, getHadoopConfig());
+        runtimeReadStrategy.setCatalogTable(catalogTable);
+        return runtimeReadStrategy;
+    }
+
+    private ReadStrategy createReadStrategyPrototype(
+            ReadonlyConfig readonlyConfig, CatalogTable catalogTable) {
+        ReadStrategy runtimeReadStrategy = ReadStrategyFactory.of(fileFormat.name());
+        runtimeReadStrategy.setPluginConfig(readonlyConfig.toConfig());
+        runtimeReadStrategy.setCatalogTable(catalogTable);
+        return runtimeReadStrategy;
+    }
+
+    private void closeReadStrategyQuietly(ReadStrategy readStrategy) {
+        try {
+            readStrategy.close();
+        } catch (Exception ignore) {
+        }
+    }
+
+    private List<String> parseFilePaths(ReadonlyConfig readonlyConfig, ReadStrategy readStrategy) {
         String rootPath = null;
         try {
             rootPath = readonlyConfig.get(FileBaseSourceOptions.FILE_PATH);
@@ -78,7 +109,8 @@ public abstract class BaseFileSourceConfig implements Serializable {
         }
     }
 
-    private CatalogTable parseCatalogTable(ReadonlyConfig readonlyConfig) {
+    private CatalogTable parseCatalogTable(
+            ReadonlyConfig readonlyConfig, ReadStrategy readStrategy, List<String> filePaths) {
         final CatalogTable catalogTable;
         boolean configSchema =
                 readonlyConfig.getOptional(ConnectorCommonOptions.SCHEMA).isPresent();
