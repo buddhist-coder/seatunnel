@@ -97,6 +97,20 @@ public class KingbaseTypeConverterTest {
     }
 
     @Test
+    public void testConvertSmallintAlias() {
+        BasicTypeDefine<Object> typeDefine =
+                BasicTypeDefine.builder()
+                        .name("test")
+                        .columnType("smallint")
+                        .dataType("smallint")
+                        .build();
+        Column column = KingbaseTypeConverter.INSTANCE.convert(typeDefine);
+        Assertions.assertEquals(typeDefine.getName(), column.getName());
+        Assertions.assertEquals(BasicType.SHORT_TYPE, column.getDataType());
+        Assertions.assertEquals(typeDefine.getColumnType(), column.getSourceType().toLowerCase());
+    }
+
+    @Test
     public void testConvertInt() {
         BasicTypeDefine<Object> typeDefine =
                 BasicTypeDefine.builder().name("test").columnType("int4").dataType("int4").build();
@@ -107,9 +121,47 @@ public class KingbaseTypeConverterTest {
     }
 
     @Test
+    public void testConvertIntegerAlias() {
+        BasicTypeDefine<Object> typeDefine =
+                BasicTypeDefine.builder()
+                        .name("test")
+                        .columnType("integer")
+                        .dataType("integer")
+                        .build();
+        Column column = KingbaseTypeConverter.INSTANCE.convert(typeDefine);
+        Assertions.assertEquals(typeDefine.getName(), column.getName());
+        Assertions.assertEquals(BasicType.INT_TYPE, column.getDataType());
+        Assertions.assertEquals(typeDefine.getColumnType(), column.getSourceType().toLowerCase());
+    }
+
+    @Test
+    public void testConvertIntAlias() {
+        BasicTypeDefine<Object> typeDefine =
+                BasicTypeDefine.builder().name("test").columnType("int").dataType("int").build();
+        Column column = KingbaseTypeConverter.INSTANCE.convert(typeDefine);
+        Assertions.assertEquals(typeDefine.getName(), column.getName());
+        Assertions.assertEquals(BasicType.INT_TYPE, column.getDataType());
+        Assertions.assertEquals(typeDefine.getColumnType(), column.getSourceType().toLowerCase());
+    }
+
+    @Test
     public void testConvertBigint() {
         BasicTypeDefine<Object> typeDefine =
                 BasicTypeDefine.builder().name("test").columnType("int8").dataType("int8").build();
+        Column column = KingbaseTypeConverter.INSTANCE.convert(typeDefine);
+        Assertions.assertEquals(typeDefine.getName(), column.getName());
+        Assertions.assertEquals(BasicType.LONG_TYPE, column.getDataType());
+        Assertions.assertEquals(typeDefine.getColumnType(), column.getSourceType().toLowerCase());
+    }
+
+    @Test
+    public void testConvertBigintAlias() {
+        BasicTypeDefine<Object> typeDefine =
+                BasicTypeDefine.builder()
+                        .name("test")
+                        .columnType("bigint")
+                        .dataType("bigint")
+                        .build();
         Column column = KingbaseTypeConverter.INSTANCE.convert(typeDefine);
         Assertions.assertEquals(typeDefine.getName(), column.getName());
         Assertions.assertEquals(BasicType.LONG_TYPE, column.getDataType());

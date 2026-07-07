@@ -36,6 +36,10 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 @AutoService(TypeConverter.class)
 public class KingbaseTypeConverter extends PostgresTypeConverter {
+    public static final String KB_SMALLINT = "SMALLINT";
+    public static final String KB_INTEGER = "INTEGER";
+    public static final String KB_INT = "INT";
+    public static final String KB_BIGINT = "BIGINT";
     public static final String KB_TINYINT = "TINYINT";
     public static final String KB_MONEY = "MONEY";
     public static final String KB_BLOB = "BLOB";
@@ -64,6 +68,16 @@ public class KingbaseTypeConverter extends PostgresTypeConverter {
 
             String kingbaseDataType = typeDefine.getDataType().toUpperCase();
             switch (kingbaseDataType) {
+                case KB_SMALLINT:
+                    builder.dataType(BasicType.SHORT_TYPE);
+                    break;
+                case KB_INTEGER:
+                case KB_INT:
+                    builder.dataType(BasicType.INT_TYPE);
+                    break;
+                case KB_BIGINT:
+                    builder.dataType(BasicType.LONG_TYPE);
+                    break;
                 case KB_TINYINT:
                     builder.dataType(BasicType.BYTE_TYPE);
                     break;
