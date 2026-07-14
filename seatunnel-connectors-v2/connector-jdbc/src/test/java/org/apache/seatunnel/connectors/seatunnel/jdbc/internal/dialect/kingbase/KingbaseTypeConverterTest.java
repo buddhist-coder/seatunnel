@@ -221,6 +221,30 @@ public class KingbaseTypeConverterTest {
         Assertions.assertEquals(typeDefine.getName(), column.getName());
         Assertions.assertEquals(new DecimalType(38, 18), column.getDataType());
         Assertions.assertEquals(typeDefine.getColumnType(), column.getSourceType());
+
+        typeDefine =
+                BasicTypeDefine.builder()
+                        .name("balance")
+                        .columnType("decimal(12,3)")
+                        .dataType("decimal")
+                        .precision(12L)
+                        .scale(3)
+                        .build();
+        column = KingbaseTypeConverter.INSTANCE.convert(typeDefine);
+        Assertions.assertEquals(typeDefine.getName(), column.getName());
+        Assertions.assertEquals(new DecimalType(12, 3), column.getDataType());
+        Assertions.assertEquals(typeDefine.getColumnType(), column.getSourceType());
+
+        typeDefine =
+                BasicTypeDefine.builder()
+                        .name("balance")
+                        .columnType("decimal")
+                        .dataType("decimal")
+                        .build();
+        column = KingbaseTypeConverter.INSTANCE.convert(typeDefine);
+        Assertions.assertEquals(typeDefine.getName(), column.getName());
+        Assertions.assertEquals(new DecimalType(38, 18), column.getDataType());
+        Assertions.assertEquals(typeDefine.getColumnType(), column.getSourceType());
     }
 
     @Test

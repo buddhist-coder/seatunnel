@@ -41,6 +41,7 @@ public class KingbaseTypeConverter extends PostgresTypeConverter {
     public static final String KB_INT = "INT";
     public static final String KB_BIGINT = "BIGINT";
     public static final String KB_TINYINT = "TINYINT";
+    public static final String KB_DECIMAL = "DECIMAL";
     public static final String KB_MONEY = "MONEY";
     public static final String KB_BLOB = "BLOB";
     public static final String KB_CLOB = "CLOB";
@@ -80,6 +81,17 @@ public class KingbaseTypeConverter extends PostgresTypeConverter {
                     break;
                 case KB_TINYINT:
                     builder.dataType(BasicType.BYTE_TYPE);
+                    break;
+                case KB_DECIMAL:
+                    DecimalType decimalType;
+                    if (typeDefine.getPrecision() != null && typeDefine.getPrecision() > 0) {
+                        decimalType =
+                                new DecimalType(
+                                        typeDefine.getPrecision().intValue(), typeDefine.getScale());
+                    } else {
+                        decimalType = new DecimalType(DEFAULT_PRECISION, DEFAULT_SCALE);
+                    }
+                    builder.dataType(decimalType);
                     break;
                 case KB_MONEY:
                     builder.dataType(new DecimalType(38, 18));
