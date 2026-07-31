@@ -42,6 +42,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingDeque;
@@ -64,7 +65,7 @@ public class ClickhouseValueReader implements Serializable {
     private static final long serialVersionUID = 4588012013447713463L;
 
     private static final DateTimeFormatter TS_FORMATTER =
-            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
 
     private final ClickhouseSourceSplit clickhouseSourceSplit;
     private final SeaTunnelRowType rowTypeInfo;
@@ -171,6 +172,9 @@ public class ClickhouseValueReader implements Serializable {
     }
 
     private boolean sqlBatchStrategyRead() {
+        // 保存本轮查询使用的游标，用于稍后检测游标是否前进
+        List<Object> previousOrderingKeyValues = sqlLastOrderingKeyValues;
+
         String query = buildBatchSqlQuery();
 
         try {
@@ -191,6 +195,18 @@ public class ClickhouseValueReader implements Serializable {
                     "lastRow: {}, extract ordering key values from row: {}",
                     lastRow,
                     sqlLastOrderingKeyValues);
+
+            // 防御性保护：游标未前进说明本轮读取无法跳过已读记录（典型场景：排序键为
+            // DateTime64 等高精度类型但字面量精度被截断，导致 WHERE > 仍命中同一批记录）。
+            // 继续下去会重复同步并死循环，因此直接结束读取
+            if (previousOrderingKeyValues != null
+                    && Objects.equals(previousOrderingKeyValues, sqlLastOrderingKeyValues)) {
+                log.warn(
+                        "Ordering key cursor not advanced, stop reading to avoid duplicate sync. splitId: {}, cursor: {}",
+                        clickhouseSourceSplit.getSplitId(),
+                        sqlLastOrderingKeyValues);
+                return false;
+            }
 
             return !rowBatch.isEmpty();
         } catch (Exception e) {
