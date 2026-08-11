@@ -58,6 +58,25 @@ public class ConfigBuilder {
 
     private static final String PLACEHOLDER_REGEX = "\\$\\{([^:{}]+)(?::[^}]*)?\\}";
 
+    /**
+     * 内嵌敏感片段的匹配模式，用于日志脱敏。
+     *
+     * <p>{@link #configDesensitization} 原本只按 key 判断敏感字段，但有些敏感信息是嵌在
+     * 一整串文本值的中间的，其 key 本身毫无敏感特征，例如 Kafka 的：
+     *
+     * <pre>
+     * "sasl.jaas.config" = "...PlainLoginModule required username=\"admin\" password=\"真实密码\";"
+     * </pre>
+     *
+     * <p>这类值在配置解密后就是明文，若原样打印会把密码泄漏进日志文件，因此这里按
+     * {@code 关键字=值} 的形态额外做一次脱敏。同样能覆盖 JDBC URL 上的 {@code ?password=xxx}
+     * 以及 SQL 语句里的密码字面量。
+     */
+    private static final Pattern EMBEDDED_SENSITIVE_PATTERN =
+            Pattern.compile(
+                    "(?i)(password|passwd|secret|token|access_key|secret_key)(\\s*=\\s*)"
+                            + "(\"[^\"]*\"|'[^']*'|[^\\s;,&]+)");
+
     private ConfigBuilder() {
         // utility class and cannot be instantiated
     }
@@ -159,18 +178,59 @@ public class ConfigBuilder {
                                                                     return configDesensitization(
                                                                             (Map<String, Object>) v,
                                                                             sensitiveKeywords);
+                                                                } else if (v instanceof String) {
+                                                                    return desensitizeEmbeddedSecrets(
+                                                                            (String) v);
                                                                 } else {
                                                                     return v;
                                                                 }
                                                             })
                                                     .collect(Collectors.toList());
                                     m.put(key, newList);
+                                } else if (value instanceof String) {
+                                    // key 本身不敏感，但值里可能嵌着 password=xxx 之类的片段
+                                    m.put(key, desensitizeEmbeddedSecrets((String) value));
                                 } else {
                                     m.put(key, value);
                                 }
                             }
                         },
                         LinkedHashMap::putAll);
+    }
+
+    /**
+     * 对字符串值内部嵌套的敏感片段做脱敏，仅用于日志输出。
+     *
+     * <p>只替换 {@code 关键字=值} 中的值部分，关键字、分隔符和引号形态都原样保留，
+     * 这样日志仍能与原始配置对照，便于排查问题。
+     *
+     * @param value 原始字符串值
+     * @return 脱敏后的字符串；未命中任何敏感片段时原样返回
+     */
+    private static String desensitizeEmbeddedSecrets(String value) {
+        if (value == null || value.isEmpty()) {
+            return value;
+        }
+        Matcher matcher = EMBEDDED_SENSITIVE_PATTERN.matcher(value);
+        if (!matcher.find()) {
+            return value;
+        }
+        matcher.reset();
+        StringBuffer buffer = new StringBuffer();
+        while (matcher.find()) {
+            String rawValue = matcher.group(3);
+            // 保留原有的引号形态，只把引号内部的内容抹掉
+            String quote =
+                    rawValue.length() >= 2 && (rawValue.startsWith("\"") || rawValue.startsWith("'"))
+                            ? rawValue.substring(0, 1)
+                            : "";
+            matcher.appendReplacement(
+                    buffer,
+                    Matcher.quoteReplacement(
+                            matcher.group(1) + matcher.group(2) + quote + "******" + quote));
+        }
+        matcher.appendTail(buffer);
+        return buffer.toString();
     }
 
     public static Config of(

@@ -43,6 +43,8 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.apache.seatunnel.core.starter.utils.ConfigBuilder.CONFIG_RENDER_OPTIONS;
 
@@ -403,6 +405,112 @@ public class ConfigShadeTest {
                 token, encryptedConfig.getConfigList("sink").get(0).getString("token"));
     }
 
+    /**
+     * 验证 ENC() 标记在任意嵌套层级都能被解密——这是社区原版做不到的部分。
+     *
+     * <p>覆盖三件事：嵌套层的局部密文被解开、顶层敏感字段的存量行为不变、
+     * 没有标记的同名业务字段不被误伤。
+     */
+    @Test
+    public void testDecryptNestedMarker() throws URISyntaxException {
+        URL resource = ConfigShadeTest.class.getResource("/config.shade_with_markers.conf");
+        Assertions.assertNotNull(resource);
+        Config config = ConfigBuilder.of(Paths.get(resource.toURI()), Lists.newArrayList());
+
+        Config source = config.getConfigList("source").get(0);
+
+        // 嵌套 map 中的局部密文被解开，且这一串文本的其余部分原样保留
+        String jaasConfig = source.getConfig("kafka.config").getString("sasl.jaas.config");
+        Assertions.assertEquals(
+                "org.apache.kafka.common.security.plain.PlainLoginModule required "
+                        + "username=\"kafkadmin\" password=\"kafka_pass\";",
+                jaasConfig);
+
+        // schema.fields 下恰好名为 password 的业务字段没有标记，必须原样保留
+        Assertions.assertEquals(
+                "string", source.getConfig("schema").getConfig("fields").getString("password"));
+
+        // 顶层敏感字段仍走整段解密，存量行为不变
+        Config sink = config.getConfigList("sink").get(0);
+        Assertions.assertEquals(USERNAME, sink.getString("username"));
+        Assertions.assertEquals(PASSWORD, sink.getString("password"));
+    }
+
+    /** 验证 DEC() 标记的局部加密，以及对已加密内容重复执行加密的幂等性。 */
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testEncryptNestedMarker() throws URISyntaxException {
+        URL resource = ConfigShadeTest.class.getResource("/config.shade_with_markers.conf");
+        Assertions.assertNotNull(resource);
+        // ConfigBuilder.of 会先解密，这里得到的是明文配置
+        Config decrypted = ConfigBuilder.of(Paths.get(resource.toURI()), Lists.newArrayList());
+
+        // 把明文密码重新用 DEC() 标注，模拟用户准备执行 --encrypt 时的输入
+        Map<String, Object> configMap = decrypted.root().unwrapped();
+        List<Map<String, Object>> sources = (List<Map<String, Object>>) configMap.get("source");
+        Map<String, Object> kafkaConfig = (Map<String, Object>) sources.get(0).get("kafka.config");
+        String marked =
+                ((String) kafkaConfig.get("sasl.jaas.config"))
+                        .replace("password=\"kafka_pass\"", "password=\"DEC(kafka_pass)\"");
+        // 前置条件：上一步解密必须已生效，否则本用例后面的断言会失去意义
+        Assertions.assertTrue(
+                marked.contains("password=\"DEC(kafka_pass)\""),
+                "解密未生效，无法构造出 DEC() 标记：" + marked);
+        kafkaConfig.put("sasl.jaas.config", marked);
+
+        Config encrypted = ConfigShadeUtils.encryptConfig(ConfigFactory.parseMap(configMap));
+        String encryptedJaas =
+                encrypted
+                        .getConfigList("source")
+                        .get(0)
+                        .getConfig("kafka.config")
+                        .getString("sasl.jaas.config");
+        Assertions.assertEquals(
+                "org.apache.kafka.common.security.plain.PlainLoginModule required "
+                        + "username=\"kafkadmin\" password=\"ENC(a2Fma2FfcGFzcw==)\";",
+                encryptedJaas);
+
+        // 幂等性：对已经是 ENC() 形态的配置再次加密，结果不应变化
+        Config encryptedAgain = ConfigShadeUtils.encryptConfig(encrypted);
+        Assertions.assertEquals(
+                encryptedJaas,
+                encryptedAgain
+                        .getConfigList("source")
+                        .get(0)
+                        .getConfig("kafka.config")
+                        .getString("sasl.jaas.config"));
+    }
+
+    /** 解密后的明文密码不能被打印进日志，即便它嵌在一个 key 并不敏感的字符串值里。 */
+    @Test
+    public void testDesensitizeEmbeddedSecret() throws URISyntaxException {
+        URL resource = ConfigShadeTest.class.getResource("/config.shade_with_markers.conf");
+        Assertions.assertNotNull(resource);
+        Config config = ConfigBuilder.of(Paths.get(resource.toURI()), Lists.newArrayList());
+
+        // 前置条件：配置本身必须已解密成明文，否则「日志里没有明文密码」
+        // 只是因为压根没解开，而不是脱敏起了作用
+        String jaasConfig =
+                config.getConfigList("source")
+                        .get(0)
+                        .getConfig("kafka.config")
+                        .getString("sasl.jaas.config");
+        Assertions.assertTrue(
+                jaasConfig.contains("password=\"kafka_pass\""),
+                "解密未生效，脱敏断言失去意义：" + jaasConfig);
+
+        Map<String, Object> desensitized =
+                ConfigBuilder.configDesensitization(
+                        config.root().unwrapped(), ConfigShadeUtils.getSensitiveOptions(config));
+        String rendered = ConfigBuilder.mapToString(desensitized);
+
+        // 明文密码不得出现在日志文本中
+        Assertions.assertFalse(rendered.contains("kafka_pass"));
+        Assertions.assertTrue(rendered.contains("password=\\\"******\\\""));
+        // 用户名等非敏感片段仍然保留，日志才有排查价值
+        Assertions.assertTrue(rendered.contains("kafkadmin"));
+    }
+
     public static class ConfigShadeWithProps implements ConfigShade {
 
         private String suffix;
@@ -449,6 +557,72 @@ public class ConfigShadeTest {
 
         @Override
         public String decrypt(String content) {
+            return new String(DECODER.decode(content));
+        }
+    }
+
+    /**
+     * 支持 ENC()/DEC() 局部标记的测试用实现，行为与生产环境的 IdssShade 一致，
+     * 只是把 AES 换成了 Base64，便于在测试里直接给出预期值。
+     *
+     * <ul>
+     *   <li>含标记时：只处理标记内部的片段，其余字符原样保留
+     *   <li>不含标记时：整段处理，即存量的顶层敏感字段行为
+     * </ul>
+     */
+    public static class MarkerConfigShade implements ConfigShade {
+
+        private static final Base64.Encoder ENCODER = Base64.getEncoder();
+
+        private static final Base64.Decoder DECODER = Base64.getDecoder();
+
+        private static final String IDENTIFIER = "marker";
+
+        private static final Pattern ENC_MARKER = Pattern.compile("ENC\\(([^()]*)\\)");
+
+        private static final Pattern DEC_MARKER = Pattern.compile("DEC\\(([^()]*)\\)");
+
+        @Override
+        public String getIdentifier() {
+            return IDENTIFIER;
+        }
+
+        @Override
+        public String encrypt(String content) {
+            Matcher matcher = DEC_MARKER.matcher(content);
+            if (matcher.find()) {
+                matcher.reset();
+                StringBuffer buffer = new StringBuffer();
+                while (matcher.find()) {
+                    String encrypted =
+                            ENCODER.encodeToString(
+                                    matcher.group(1).getBytes(StandardCharsets.UTF_8));
+                    matcher.appendReplacement(
+                            buffer, Matcher.quoteReplacement("ENC(" + encrypted + ")"));
+                }
+                matcher.appendTail(buffer);
+                return buffer.toString();
+            }
+            // 已是 ENC() 形态则跳过，保证重复加密的幂等性
+            if (ENC_MARKER.matcher(content).find()) {
+                return content;
+            }
+            return ENCODER.encodeToString(content.getBytes(StandardCharsets.UTF_8));
+        }
+
+        @Override
+        public String decrypt(String content) {
+            Matcher matcher = ENC_MARKER.matcher(content);
+            if (matcher.find()) {
+                matcher.reset();
+                StringBuffer buffer = new StringBuffer();
+                while (matcher.find()) {
+                    String plainText = new String(DECODER.decode(matcher.group(1)));
+                    matcher.appendReplacement(buffer, Matcher.quoteReplacement(plainText));
+                }
+                matcher.appendTail(buffer);
+                return buffer.toString();
+            }
             return new String(DECODER.decode(content));
         }
     }

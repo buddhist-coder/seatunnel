@@ -54,6 +54,21 @@ public final class ConfigShadeUtils {
     public static final String[] DEFAULT_SENSITIVE_KEYWORDS =
             new String[] {"password", "username", "auth", "token", "access_key", "secret_key"};
 
+    /**
+     * 局部密文标记前缀，完整形态为 ENC(密文)。
+     *
+     * <p>解密时，任意嵌套层级的字符串值只要包含该前缀，就会被整体交给 {@link ConfigShade#decrypt}，
+     * 由具体实现负责识别标记、替换其中的密文片段。
+     */
+    public static final String ENCRYPTED_MARKER_PREFIX = "ENC(";
+
+    /**
+     * 局部明文标记前缀，完整形态为 DEC(明文)。
+     *
+     * <p>加密时的对应标记，语义与 {@link #ENCRYPTED_MARKER_PREFIX} 相同，方向相反。
+     */
+    public static final String DECRYPTED_MARKER_PREFIX = "DEC(";
+
     private static final Map<String, ConfigShade> CONFIG_SHADES = new HashMap<>();
 
     private static final ConfigShade DEFAULT_SHADE = new DefaultConfigShade();
@@ -205,7 +220,74 @@ public final class ConfigShadeUtils {
         configMap.put(Constants.SOURCE, sources);
         configMap.put(Constants.SINK, sinks);
         configMap.put(Constants.TRANSFORM, transforms);
+
+        // 顶层敏感字段处理完毕后，再按 ENC()/DEC() 标记递归处理任意嵌套层级。
+        //
+        // 两步的先后顺序不可颠倒：顶层敏感字段在上一步已经被整体加解密，其结果不再含有标记，
+        // 递归时会自然跳过，因此同一个值不会被处理两次。
+        processMarkedValues(configMap, isDecrypted, configShade);
+
         return ConfigFactory.parseMap(configMap);
+    }
+
+    /**
+     * 递归遍历配置树，对带有 ENC()/DEC() 标记的字符串值执行加解密。
+     *
+     * <p>与顶层的敏感字段匹配不同，这里完全不看 key 叫什么，只认值里的显式标记。
+     * 这是为了覆盖 Kafka 的 {@code sasl.jaas.config} 这类场景——敏感信息埋在
+     * 嵌套 map 的一整串文本中间，其 key（{@code sasl.jaas.config}）既不是 password，
+     * 也不可能穷举进敏感字段列表。
+     *
+     * <p>反过来，「只认标记」也保证了不会误伤：{@code schema.fields} 下恰好名为
+     * password 的业务字段没有标记，因此不会被当成密文处理。
+     *
+     * @param node 当前遍历到的节点，可能是 Map、List 或标量
+     * @param isDecrypted true 表示解密，false 表示加密
+     * @param configShade 实际执行加解密的实现
+     */
+    @SuppressWarnings("unchecked")
+    private static void processMarkedValues(
+            Object node, boolean isDecrypted, ConfigShade configShade) {
+        if (node instanceof Map) {
+            for (Map.Entry<String, Object> entry : ((Map<String, Object>) node).entrySet()) {
+                Object original = entry.getValue();
+                Object processed = processMarkedValue(original, isDecrypted, configShade);
+                // 仅在值确实发生变化时才写回，避免对不可变集合做无谓的写操作
+                if (processed != original) {
+                    entry.setValue(processed);
+                }
+            }
+        } else if (node instanceof List) {
+            List<Object> list = (List<Object>) node;
+            for (int i = 0; i < list.size(); i++) {
+                Object original = list.get(i);
+                Object processed = processMarkedValue(original, isDecrypted, configShade);
+                if (processed != original) {
+                    list.set(i, processed);
+                }
+            }
+        }
+    }
+
+    /**
+     * 处理单个节点值：字符串按标记加解密，容器类型继续下钻。
+     *
+     * @return 处理后的值；未命中标记时原样返回入参对象（调用方据此判断是否需要写回）
+     */
+    private static Object processMarkedValue(
+            Object value, boolean isDecrypted, ConfigShade configShade) {
+        // 只有字符串才可能携带标记，其余类型继续向下递归
+        if (!(value instanceof String)) {
+            processMarkedValues(value, isDecrypted, configShade);
+            return value;
+        }
+        String text = (String) value;
+        String marker = isDecrypted ? ENCRYPTED_MARKER_PREFIX : DECRYPTED_MARKER_PREFIX;
+        // 不含标记的值一律不碰，确保存量配置的行为完全不变
+        if (!text.contains(marker)) {
+            return value;
+        }
+        return isDecrypted ? configShade.decrypt(text) : configShade.encrypt(text);
     }
 
     public static Set<String> getSensitiveOptions(Config config) {

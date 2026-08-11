@@ -15,3 +15,4 @@
 
 org.apache.seatunnel.core.starter.utils.ConfigShadeTest$Base64ConfigShade
 org.apache.seatunnel.core.starter.utils.ConfigShadeTest$ConfigShadeWithProps
+org.apache.seatunnel.core.starter.utils.ConfigShadeTest$MarkerConfigShade
