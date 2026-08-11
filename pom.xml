@@ -168,11 +168,19 @@
         <software.amazon.awssdk.version>2.31.30</software.amazon.awssdk.version>
         <arrow.version>15.0.1</arrow.version>
         <okhttp.version>4.12.0</okhttp.version>
+        <!-- 国密算法(SM3/SM4)依赖, JDK8 兼容版本 -->
+        <bcprov.version>1.70</bcprov.version>
 
     </properties>
 
     <dependencyManagement>
         <dependencies>
+            <!-- BouncyCastle: 国密算法(SM3/SM4)轻量 API 依赖 -->
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcprov-jdk15on</artifactId>
+                <version>${bcprov.version}</version>
+            </dependency>
             <!-- ***************** slf4j & provider & bridges start ***************** -->
             <!-- Declare slf4j-api -->
             <dependency>
