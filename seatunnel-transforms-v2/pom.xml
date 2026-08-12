@@ -121,6 +121,11 @@
             <version>${project.version}</version>
             <classifier>optional</classifier>
         </dependency>
+        <!-- 国密算法(SM3/SM4)轻量 API 依赖 -->
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcprov-jdk15on</artifactId>
+        </dependency>
     </dependencies>
 
     <build>
