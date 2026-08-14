@@ -21,6 +21,7 @@ import org.apache.seatunnel.api.configuration.ReadonlyConfig;
 import org.apache.seatunnel.api.table.catalog.CatalogTable;
 import org.apache.seatunnel.api.table.catalog.Column;
 import org.apache.seatunnel.api.table.type.BasicType;
+import org.apache.seatunnel.api.table.type.SeaTunnelRow;
 import org.apache.seatunnel.api.table.type.SeaTunnelRowAccessor;
 import org.apache.seatunnel.api.table.type.SeaTunnelRowType;
 import org.apache.seatunnel.api.table.type.SqlType;
@@ -111,6 +112,19 @@ public class EncryptTransform extends MultipleFieldOutputTransform {
     @Override
     public String getPluginName() {
         return PLUGIN_NAME;
+    }
+
+    /**
+     * 覆写父类逻辑：先浅拷贝输入行再交给父类处理。
+     *
+     * <p>引擎在"一个上游分叉给多个下游"时向所有下游传递同一个 SeaTunnelRow 引用
+     * （见 SeaTunnelSourceCollector#sendRecordToNext）；而父类在不新增列时走 REUSE_ROW
+     * 原地修改输入行，会污染其他链路（如另一条链配置了脱敏，两个 sink 会拿到同样的值）。
+     * 先 copy 保证本 transform 只修改私有副本，与拓扑无关地保持正确性。
+     */
+    @Override
+    protected SeaTunnelRow transformRow(SeaTunnelRow inputRow) {
+        return super.transformRow(inputRow.copy());
     }
 
     @Override
