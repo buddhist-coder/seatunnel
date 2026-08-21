@@ -64,6 +64,8 @@ import java.util.stream.Collectors;
 public class ClickhouseValueReader implements Serializable {
     private static final long serialVersionUID = 4588012013447713463L;
 
+    // Keep millisecond precision so DateTime64 sorting-key cursors are not truncated
+    // (truncation can cause keyset pagination to re-read the same batch forever).
     private static final DateTimeFormatter TS_FORMATTER =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
 
@@ -414,10 +416,16 @@ public class ClickhouseValueReader implements Serializable {
                 }
                 return quoteString(String.valueOf(value));
             case TIMESTAMP:
-                if (value instanceof LocalDateTime) {
-                    return quoteString(TS_FORMATTER.format((LocalDateTime) value));
-                }
-                return quoteString(String.valueOf(value));
+                // SeaTunnel maps both ClickHouse DateTime and DateTime64 to TIMESTAMP.
+                // Bare string literals with ".SSS" fail implicit cast to DateTime
+                // (Code 53 TYPE_MISMATCH), while omitting millis truncates DateTime64
+                // cursors and can cause keyset pagination dead loops. Explicit
+                // toDateTime64 keeps sub-second precision and compares safely with both.
+                String tsLiteral =
+                        value instanceof LocalDateTime
+                                ? TS_FORMATTER.format((LocalDateTime) value)
+                                : String.valueOf(value);
+                return "toDateTime64(" + quoteString(tsLiteral) + ", 3)";
             default:
                 return quoteString(String.valueOf(value));
         }

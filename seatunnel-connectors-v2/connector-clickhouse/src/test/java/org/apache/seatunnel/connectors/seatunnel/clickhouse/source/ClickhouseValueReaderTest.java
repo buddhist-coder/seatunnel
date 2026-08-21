@@ -19,6 +19,7 @@ package org.apache.seatunnel.connectors.seatunnel.clickhouse.source;
 
 import org.apache.seatunnel.api.table.catalog.TablePath;
 import org.apache.seatunnel.api.table.type.BasicType;
+import org.apache.seatunnel.api.table.type.LocalTimeType;
 import org.apache.seatunnel.api.table.type.SeaTunnelDataType;
 import org.apache.seatunnel.api.table.type.SeaTunnelRow;
 import org.apache.seatunnel.api.table.type.SeaTunnelRowType;
@@ -48,6 +49,7 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -356,6 +358,59 @@ public class ClickhouseValueReaderTest {
         keyValues = Arrays.asList(100L, "test");
         result = buildKeysetWhereConditionMethod.invoke(reader, sortingKey, keyValues);
         Assertions.assertEquals("", result);
+    }
+
+    @Test
+    public void testBuildKeysetWhereConditionWithTimestamp() throws Exception {
+        // SeaTunnel maps both ClickHouse DateTime and DateTime64 to TIMESTAMP.
+        // Keyset literals must keep millisecond precision (DateTime64 cursors) and
+        // wrap with toDateTime64 so DateTime columns do not fail TYPE_MISMATCH.
+        String[] fieldNames = new String[] {"audit_log_id", "op_time", "audit_log_type"};
+        SeaTunnelDataType<?>[] fieldTypes =
+                new SeaTunnelDataType<?>[] {
+                    BasicType.STRING_TYPE,
+                    LocalTimeType.LOCAL_DATE_TIME_TYPE,
+                    BasicType.STRING_TYPE
+                };
+        SeaTunnelRowType tsRowType = new SeaTunnelRowType(fieldNames, fieldTypes);
+        ClickhouseValueReader tsReader = new ClickhouseValueReader(split, tsRowType, sourceTable);
+
+        Optional<Method> methodOpt =
+                ReflectionUtils.getDeclaredMethod(
+                        ClickhouseValueReader.class,
+                        "buildKeysetWhereCondition",
+                        String.class,
+                        List.class);
+        Assertions.assertTrue(methodOpt.isPresent());
+        Method buildKeysetWhereConditionMethod = methodOpt.get();
+
+        // DateTime-like value (second precision, millis = 0)
+        String sortingKey = "audit_log_id, op_time, audit_log_type";
+        List<Object> dateTimeKeyValues =
+                Arrays.asList(
+                        "ffe5b4c0-ba89-4bdb-9f53-43b1f0c958f8",
+                        LocalDateTime.of(2026, 8, 15, 0, 0, 0),
+                        "INTER_NEW_CLIENTIP");
+        Object dateTimeResult =
+                buildKeysetWhereConditionMethod.invoke(tsReader, sortingKey, dateTimeKeyValues);
+        Assertions.assertEquals(
+                "(audit_log_id, op_time, audit_log_type) > "
+                        + "('ffe5b4c0-ba89-4bdb-9f53-43b1f0c958f8', "
+                        + "toDateTime64('2026-08-15 00:00:00.000', 3), 'INTER_NEW_CLIENTIP')",
+                dateTimeResult);
+
+        // DateTime64-like value (sub-second precision must be preserved)
+        List<Object> dateTime64KeyValues =
+                Arrays.asList(
+                        "id-1",
+                        LocalDateTime.of(2026, 8, 15, 0, 0, 0, 123_000_000),
+                        "TYPE_A");
+        Object dateTime64Result =
+                buildKeysetWhereConditionMethod.invoke(tsReader, sortingKey, dateTime64KeyValues);
+        Assertions.assertEquals(
+                "(audit_log_id, op_time, audit_log_type) > "
+                        + "('id-1', toDateTime64('2026-08-15 00:00:00.123', 3), 'TYPE_A')",
+                dateTime64Result);
     }
 
     @Test
