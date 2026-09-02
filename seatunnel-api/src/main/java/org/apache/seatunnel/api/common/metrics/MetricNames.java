@@ -29,6 +29,14 @@ public final class MetricNames {
     public static final String SOURCE_RECEIVED_BYTES = "SourceReceivedBytes";
     public static final String SOURCE_RECEIVED_QPS = "SourceReceivedQPS";
     public static final String SOURCE_RECEIVED_BYTES_PER_SECONDS = "SourceReceivedBytesPerSeconds";
+
+    /**
+     * 发送数据量：由上游校验文件声明的数据总条数，与读数据量、写数据量同级别。
+     *
+     * <p>该指标不是逐行累加得来的，而是由 source 连接器解析校验文件后一次性上报，仅用于观测与对账，不参与任何一致性校验。
+     */
+    public static final String SOURCE_SENT_COUNT = "SourceSentCount";
+
     public static final String SINK_WRITE_COUNT = "SinkWriteCount";
     public static final String SINK_WRITE_BYTES = "SinkWriteBytes";
     public static final String SINK_WRITE_QPS = "SinkWriteQPS";

@@ -21,6 +21,8 @@ import org.apache.seatunnel.api.source.SourceSplitEnumerator;
 import org.apache.seatunnel.connectors.seatunnel.file.config.BaseFileSourceConfig;
 import org.apache.seatunnel.connectors.seatunnel.file.config.BaseMultipleTableFileSourceConfig;
 import org.apache.seatunnel.connectors.seatunnel.file.source.state.FileSourceState;
+import org.apache.seatunnel.connectors.seatunnel.file.source.verify.VerifyFileMeta;
+import org.apache.seatunnel.connectors.seatunnel.file.source.verify.VerifyFileParser;
 
 import org.apache.commons.collections4.CollectionUtils;
 
@@ -49,6 +51,10 @@ public class MultipleTableFileSourceSplitEnumerator
     private final Set<FileSourceSplit> allSplit;
     private final Set<FileSourceSplit> assignedSplit;
     private final Map<String, List<String>> filePathMap;
+
+    /** tableId -> (压缩包名称 -> 校验文件元信息)。未开启校验文件功能时，每个表对应一个空 Map。 */
+    private final Map<String, Map<String, VerifyFileMeta>> verifyFileMetaMap;
+
     private final AtomicInteger assignCount = new AtomicInteger(0);
     private final Object lock = new Object();
     private final FileSplitStrategy fileSplitStrategy;
@@ -69,6 +75,17 @@ public class MultipleTableFileSourceSplitEnumerator
                                                         .toTablePath()
                                                         .toString(),
                                         BaseFileSourceConfig::getFilePaths));
+        this.verifyFileMetaMap =
+                multipleTableFileSourceConfig.getFileSourceConfigs().stream()
+                        .collect(
+                                Collectors.toMap(
+                                        localFileSourceConfig ->
+                                                localFileSourceConfig
+                                                        .getCatalogTable()
+                                                        .getTableId()
+                                                        .toTablePath()
+                                                        .toString(),
+                                        BaseFileSourceConfig::getVerifyFileMetaMap));
         this.assignedSplit = new HashSet<>();
         this.allSplit = new TreeSet<>(Comparator.comparing(FileSourceSplit::splitId));
         this.fileSplitStrategy = fileSplitStrategy;
@@ -100,6 +117,7 @@ public class MultipleTableFileSourceSplitEnumerator
             List<String> filePaths = filePathEntry.getValue();
             for (String filePath : filePaths) {
                 List<FileSourceSplit> splits = fileSplitStrategy.split(tableId, filePath);
+                applyVerifyMeta(tableId, filePath, splits);
                 splitCountByTable.merge(tableId, splits.size(), Integer::sum);
                 allSplit.addAll(splits);
                 if (splits.size() > 1) {
@@ -117,6 +135,30 @@ public class MultipleTableFileSourceSplitEnumerator
                     "Split enumeration finished, total splits: {}, splits by table: {}",
                     allSplit.size(),
                     splitCountByTable);
+        }
+    }
+
+    /**
+     * 把校验文件解析出的声明条数与 MD5 填充到 split 上。
+     *
+     * <p>压缩包不会被切分（见 {@code FileSplitStrategyFactory}：archive_compress_codec != none 时强制单 split），
+     * 因此一个数据文件对应一个 split。这里仍按「只让第一个 split 携带声明条数」处理，这样万一将来出现一个文件切多个 split
+     * 的组合，发送数据量也不会被重复累加。
+     */
+    private void applyVerifyMeta(String tableId, String filePath, List<FileSourceSplit> splits) {
+        Map<String, VerifyFileMeta> metaMap = verifyFileMetaMap.get(tableId);
+        if (metaMap == null || metaMap.isEmpty() || splits.isEmpty()) {
+            return;
+        }
+        VerifyFileMeta meta = metaMap.get(VerifyFileParser.extractFileName(filePath));
+        if (meta == null) {
+            // 未被声明的数据文件在扫描阶段就已被剔除，正常不会走到这里
+            log.warn("No verify file declaration found for data file [{}].", filePath);
+            return;
+        }
+        Long declaredCount = meta.hasDeclaredCount() ? meta.getDeclaredCount() : null;
+        for (int i = 0; i < splits.size(); i++) {
+            splits.get(i).applyVerifyMeta(i == 0 ? declaredCount : null, meta.getExpectedMd5());
         }
     }
 

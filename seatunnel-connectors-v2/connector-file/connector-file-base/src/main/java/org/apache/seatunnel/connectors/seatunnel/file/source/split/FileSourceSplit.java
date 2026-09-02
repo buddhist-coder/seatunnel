@@ -33,6 +33,16 @@ public class FileSourceSplit implements SourceSplit {
     @Getter private long start = 0;
     @Getter private long length = -1;
 
+    /**
+     * 校验文件声明的数据条数，即「发送数据量」。
+     *
+     * <p>使用包装类型而非 long，是为了让旧版本 checkpoint 反序列化后天然为 null（表示无声明），与「真实声明了 0 条」区分开。
+     */
+    @Getter private Long declaredCount;
+
+    /** 校验文件声明的 MD5 值，null 表示未声明。 */
+    @Getter private String expectedMd5;
+
     public FileSourceSplit(String splitId) {
         this.filePath = splitId;
         this.tableId = null;
@@ -57,6 +67,28 @@ public class FileSourceSplit implements SourceSplit {
         if (start == 0L && length == 0L) {
             length = -1L;
         }
+        // 兼容性：旧 checkpoint 不含校验文件字段，反序列化后 declaredCount / expectedMd5 均为 null，
+        // 语义即「无声明」，无需额外处理。
+    }
+
+    /**
+     * 填充校验文件解析出的元信息。由 Enumerator 在生成 split 后调用。
+     *
+     * <p>这两个字段不参与 {@link #equals} 与 {@link #hashCode}，因此不会影响 addSplitsBack 的去重与 split 排序。
+     */
+    public void applyVerifyMeta(Long declaredCount, String expectedMd5) {
+        this.declaredCount = declaredCount;
+        this.expectedMd5 = expectedMd5;
+    }
+
+    /** 是否携带了有效的声明条数。 */
+    public boolean hasDeclaredCount() {
+        return declaredCount != null && declaredCount >= 0L;
+    }
+
+    /** 是否携带了声明的 MD5 值。 */
+    public boolean hasExpectedMd5() {
+        return expectedMd5 != null && !expectedMd5.isEmpty();
     }
 
     @Override

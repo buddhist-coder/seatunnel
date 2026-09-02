@@ -278,6 +278,8 @@ public class ClientExecuteCommand implements Command<ClientCommandArgs> {
                                         endTime, DateTimeUtils.Formatter.YYYY_MM_DD_HH_MM_SS),
                                 "Total Time(s)",
                                 Duration.between(startTime, endTime).getSeconds(),
+                                "Total Sent Count",
+                                jobMetricsSummary.getSourceSentCount(),
                                 "Total Read Count",
                                 jobMetricsSummary.getSourceReadCount(),
                                 "Total Write Count",

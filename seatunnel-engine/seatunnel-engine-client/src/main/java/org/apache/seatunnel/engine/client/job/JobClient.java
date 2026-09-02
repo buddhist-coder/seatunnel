@@ -158,15 +158,27 @@ public class JobClient {
     }
 
     public JobMetricsRunner.JobMetricsSummary getJobMetricsSummary(Long jobId) {
+        long sourceSentCount = 0L;
         long sourceReadCount = 0L;
         long sinkWriteCount = 0L;
         long sinkCommittedCount = 0L;
         String jobMetrics = getJobMetrics(jobId);
         try {
             JsonNode jsonNode = OBJECT_MAPPER.readTree(jobMetrics);
+            // 发送数据量，仅在 source 侧开启了校验文件解析时才存在
+            JsonNode sourceSents = jsonNode.get("SourceSentCount");
             JsonNode sourceReaders = jsonNode.get("SourceReceivedCount");
             JsonNode sinkWriters = jsonNode.get("SinkWriteCount");
             JsonNode sinkCommitteds = jsonNode.get("SinkCommittedCount");
+
+            if (sourceSents != null) {
+                for (int i = 0; i < sourceSents.size(); i++) {
+                    JsonNode sourceSent = sourceSents.get(i);
+                    if (sourceSent != null) {
+                        sourceSentCount += sourceSent.get("value").asLong();
+                    }
+                }
+            }
 
             if (sourceReaders != null) {
                 for (int i = 0; i < sourceReaders.size(); i++) {
@@ -196,10 +208,10 @@ public class JobClient {
             }
 
             return new JobMetricsRunner.JobMetricsSummary(
-                    sourceReadCount, sinkWriteCount, sinkCommittedCount);
+                    sourceSentCount, sourceReadCount, sinkWriteCount, sinkCommittedCount);
         } catch (JsonProcessingException | NullPointerException e) {
             return new JobMetricsRunner.JobMetricsSummary(
-                    sourceReadCount, sinkWriteCount, sinkCommittedCount);
+                    sourceSentCount, sourceReadCount, sinkWriteCount, sinkCommittedCount);
         }
     }
 

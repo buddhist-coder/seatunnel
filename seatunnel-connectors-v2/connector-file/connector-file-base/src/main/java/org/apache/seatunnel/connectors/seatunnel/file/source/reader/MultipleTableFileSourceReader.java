@@ -17,6 +17,8 @@
 
 package org.apache.seatunnel.connectors.seatunnel.file.source.reader;
 
+import org.apache.seatunnel.api.common.metrics.Counter;
+import org.apache.seatunnel.api.common.metrics.MetricNames;
 import org.apache.seatunnel.api.source.Collector;
 import org.apache.seatunnel.api.source.SourceReader;
 import org.apache.seatunnel.api.table.type.SeaTunnelRow;
@@ -48,6 +50,13 @@ public class MultipleTableFileSourceReader implements SourceReader<SeaTunnelRow,
 
     private final Map<String, ReadStrategy> readStrategyMap;
 
+    /**
+     * 发送数据量计数器：累加上游校验文件声明的条数，与 SourceReceivedCount、SinkWriteCount 同级别。
+     *
+     * <p>该指标不是逐行累加的，而是每个压缩包上报一次；仅用于观测对账，不参与任何校验。
+     */
+    private Counter sentCountCounter;
+
     public MultipleTableFileSourceReader(
             Context context, BaseMultipleTableFileSourceConfig multipleTableFileSourceConfig) {
         this.context = context;
@@ -77,7 +86,12 @@ public class MultipleTableFileSourceReader implements SourceReader<SeaTunnelRow,
                                     + split.getTableId()
                                     + "]");
                 }
+                // 读取前的前置校验（当前为 MD5，仅 verify_md5_enabled=true 时实际执行）。
+                // 放在 try 之外，让校验失败的异常保留自身的明确原因，不被 FILE_READ_FAILED 二次包装
+                verifyBeforeRead(readStrategy, split);
                 try {
+                    // 上报「发送数据量」：来自上游校验文件的声明，只上报、不参与校验
+                    reportSentCount(split);
                     readStrategy.read(split, output);
                 } catch (Exception e) {
                     String errorMsg =
@@ -115,8 +129,36 @@ public class MultipleTableFileSourceReader implements SourceReader<SeaTunnelRow,
 
     @Override
     public void open() throws Exception {
-        // do nothing
         log.info("Opened the MultipleTableLocalFileSourceReader");
+        // MetricsContext 在 Zeta 引擎下是真实实现；Flink/Spark 目前仍是空实现（社区 #3431），指标会被静默丢弃
+        this.sentCountCounter = context.getMetricsContext().counter(MetricNames.SOURCE_SENT_COUNT);
+    }
+
+    /** 读取前的前置校验（当前为 MD5）。校验失败的异常已携带明确原因，直接抛出不再包装。 */
+    private void verifyBeforeRead(ReadStrategy readStrategy, FileSourceSplit split) {
+        try {
+            readStrategy.verifyBeforeRead(split);
+        } catch (FileConnectorException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new FileConnectorException(
+                    FILE_READ_FAILED,
+                    String.format("Verify file [%s] before read failed", split.splitId()),
+                    e);
+        }
+    }
+
+    /** 上报发送数据量。一个压缩包只上报一次；未携带声明条数的 split 不上报。 */
+    private void reportSentCount(FileSourceSplit split) {
+        if (sentCountCounter == null || !split.hasDeclaredCount()) {
+            return;
+        }
+        long declaredCount = split.getDeclaredCount();
+        sentCountCounter.inc(declaredCount);
+        log.info(
+                "Reported SourceSentCount {} declared by the verify file for split [{}].",
+                declaredCount,
+                split.splitId());
     }
 
     @Override

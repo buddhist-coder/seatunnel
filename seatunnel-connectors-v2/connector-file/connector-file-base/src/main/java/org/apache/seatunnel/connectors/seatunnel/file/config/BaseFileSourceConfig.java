@@ -30,6 +30,7 @@ import org.apache.seatunnel.connectors.seatunnel.file.exception.FileConnectorErr
 import org.apache.seatunnel.connectors.seatunnel.file.exception.FileConnectorException;
 import org.apache.seatunnel.connectors.seatunnel.file.source.reader.ReadStrategy;
 import org.apache.seatunnel.connectors.seatunnel.file.source.reader.ReadStrategyFactory;
+import org.apache.seatunnel.connectors.seatunnel.file.source.verify.VerifyFileMeta;
 
 import org.apache.commons.collections4.CollectionUtils;
 
@@ -37,6 +38,7 @@ import lombok.Getter;
 
 import java.io.Serializable;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
@@ -53,6 +55,13 @@ public abstract class BaseFileSourceConfig implements Serializable {
     private final List<String> filePaths;
     private final ReadonlyConfig baseFileSourceConfig;
 
+    /**
+     * 校验文件解析结果：压缩包名称（不含目录） -> 元信息。
+     *
+     * <p>在扫描目录时由 ReadStrategy 产出，这里保存下来供 Enumerator 生成 split 时取用。未开启校验文件功能时为空 Map。
+     */
+    private final Map<String, VerifyFileMeta> verifyFileMetaMap;
+
     public abstract HadoopConf getHadoopConfig();
 
     public abstract String getPluginName();
@@ -63,14 +72,19 @@ public abstract class BaseFileSourceConfig implements Serializable {
         ReadStrategy probeReadStrategy = ReadStrategyFactory.of(readonlyConfig, getHadoopConfig());
         List<String> discoveredFilePaths;
         CatalogTable discoveredCatalogTable;
+        Map<String, VerifyFileMeta> discoveredVerifyFileMetas;
         try {
             discoveredFilePaths = parseFilePaths(readonlyConfig, probeReadStrategy);
+            // 校验文件的解析结果是扫描目录时的副产物，必须在 probeReadStrategy 关闭之前取出
+            discoveredVerifyFileMetas =
+                    new LinkedHashMap<>(probeReadStrategy.getVerifyFileMetaMap());
             discoveredCatalogTable =
                     parseCatalogTable(readonlyConfig, probeReadStrategy, discoveredFilePaths);
         } finally {
             closeReadStrategyQuietly(probeReadStrategy);
         }
         this.filePaths = discoveredFilePaths;
+        this.verifyFileMetaMap = discoveredVerifyFileMetas;
         this.catalogTable = discoveredCatalogTable;
         this.readStrategy = createReadStrategyPrototype(readonlyConfig, discoveredCatalogTable);
     }

@@ -71,6 +71,8 @@ public class JobMetricsRunner implements Runnable {
                             "Job Progress Information",
                             "Job Id",
                             jobId,
+                            "Sent Count So Far",
+                            jobMetricsSummary.getSourceSentCount(),
                             "Read Count So Far",
                             jobMetricsSummary.getSourceReadCount(),
                             "Write Attempt Count So Far",
@@ -103,6 +105,13 @@ public class JobMetricsRunner implements Runnable {
     @Data
     @AllArgsConstructor
     public static class JobMetricsSummary {
+        /**
+         * 发送数据量：上游校验文件声明的数据总条数。
+         *
+         * <p>仅在 source 侧开启了校验文件解析时才会大于 0，与读/写数据量同级别，只用于观测对账。
+         */
+        private long sourceSentCount;
+
         private long sourceReadCount;
         private long sinkWriteCount;
         private long sinkCommittedCount;

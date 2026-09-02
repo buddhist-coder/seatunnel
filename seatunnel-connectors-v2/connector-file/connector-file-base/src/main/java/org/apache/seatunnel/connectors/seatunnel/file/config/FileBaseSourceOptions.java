@@ -188,4 +188,65 @@ public class FileBaseSourceOptions extends FileBaseOptions {
                     .noDefaultValue()
                     .withDescription(
                             "A single character that allows the quote or other special characters to appear inside a CSV field without ending the field.");
+
+    // ==================== 校验文件与「发送数据量」指标 ====================
+
+    public static final Option<Boolean> VERIFY_FILE_ENABLED =
+            Options.key("verify_file_enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "是否启用校验文件解析。开启后：1) 校验文件本身不会被当作数据文件读取；"
+                                    + "2) 仅读取被校验文件声明过的数据文件，未声明的一律跳过（等同于投放完成闸门）；"
+                                    + "3) 上报 SourceSentCount（发送数据量）指标。默认 false，不影响任何现有作业。");
+
+    public static final Option<String> VERIFY_FILE_SUFFIX =
+            Options.key("verify_file_suffix")
+                    .stringType()
+                    .defaultValue(".success")
+                    .withDescription("校验文件的识别后缀，例如 .success、.check。仅在 verify_file_enabled=true 时生效。");
+
+    public static final Option<String> VERIFY_FILE_DELIMITER =
+            Options.key("verify_file_delimiter")
+                    .stringType()
+                    .defaultValue("|")
+                    .withDescription("校验文件单行内容的字段分隔符，原样配置即可，无需转义正则元字符。");
+
+    public static final Option<Integer> VERIFY_FIELD_INDEX_NAME =
+            Options.key("verify_field_index_name")
+                    .intType()
+                    .defaultValue(0)
+                    .withDescription("「压缩包名称」在校验文件行内的字段下标，从 0 开始。该字段是数据文件与校验文件配对的依据，必须存在。");
+
+    public static final Option<Integer> VERIFY_FIELD_INDEX_COUNT =
+            Options.key("verify_field_index_count")
+                    .intType()
+                    .defaultValue(1)
+                    .withDescription(
+                            "「数据总条数」在校验文件行内的字段下标，从 0 开始，-1 表示不取。"
+                                    + "该值仅用于 SourceSentCount 指标上报，不参与任何一致性校验。");
+
+    public static final Option<Integer> VERIFY_FIELD_INDEX_MD5 =
+            Options.key("verify_field_index_md5")
+                    .intType()
+                    .defaultValue(2)
+                    .withDescription("「MD5」在校验文件行内的字段下标，从 0 开始，-1 表示不取。");
+
+    public static final Option<Boolean> VERIFY_MD5_ENABLED =
+            Options.key("verify_md5_enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "是否开启 MD5 前置校验。开启后在读取数据前完整读一遍压缩包计算 MD5 并与声明值比对，"
+                                    + "意味着每个文件被读取两遍，大文件场景需评估 IO 开销。默认 false。");
+
+    public static final Option<VerifyMismatchAction> VERIFY_ON_MISMATCH =
+            Options.key("verify_on_mismatch")
+                    .singleChoice(
+                            VerifyMismatchAction.class,
+                            Arrays.asList(VerifyMismatchAction.WARN, VerifyMismatchAction.FAIL))
+                    .defaultValue(VerifyMismatchAction.WARN)
+                    .withDescription(
+                            "MD5 比对不一致时的动作：warn 仅打 ERROR 日志后照常读取，fail 抛异常终止作业。"
+                                    + "仅对 MD5 生效——声明条数只上报、不参与校验。");
 }

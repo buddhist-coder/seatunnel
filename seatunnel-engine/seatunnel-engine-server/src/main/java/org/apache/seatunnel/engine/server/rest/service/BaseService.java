@@ -99,6 +99,7 @@ import static org.apache.seatunnel.api.common.metrics.MetricNames.SOURCE_RECEIVE
 import static org.apache.seatunnel.api.common.metrics.MetricNames.SOURCE_RECEIVED_BYTES_PER_SECONDS;
 import static org.apache.seatunnel.api.common.metrics.MetricNames.SOURCE_RECEIVED_COUNT;
 import static org.apache.seatunnel.api.common.metrics.MetricNames.SOURCE_RECEIVED_QPS;
+import static org.apache.seatunnel.api.common.metrics.MetricNames.SOURCE_SENT_COUNT;
 import static org.apache.seatunnel.engine.server.rest.RestConstant.TABLE_SINK_COMMITTED_BYTES;
 import static org.apache.seatunnel.engine.server.rest.RestConstant.TABLE_SINK_COMMITTED_BYTES_PER_SECONDS;
 import static org.apache.seatunnel.engine.server.rest.RestConstant.TABLE_SINK_COMMITTED_COUNT;
@@ -301,6 +302,8 @@ public abstract class BaseService {
 
         // To add metrics, populate the corresponding array,
         String[] countMetricsNames = {
+            // 发送数据量：由 source 侧解析上游校验文件后上报，与读/写数据量同级别
+            SOURCE_SENT_COUNT,
             SOURCE_RECEIVED_COUNT,
             SINK_WRITE_COUNT,
             SINK_COMMITTED_COUNT,

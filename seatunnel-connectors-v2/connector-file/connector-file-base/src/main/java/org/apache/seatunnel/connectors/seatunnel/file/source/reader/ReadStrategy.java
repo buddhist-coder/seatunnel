@@ -30,10 +30,12 @@ import org.apache.seatunnel.common.exception.SeaTunnelRuntimeException;
 import org.apache.seatunnel.connectors.seatunnel.file.config.HadoopConf;
 import org.apache.seatunnel.connectors.seatunnel.file.exception.FileConnectorException;
 import org.apache.seatunnel.connectors.seatunnel.file.source.split.FileSourceSplit;
+import org.apache.seatunnel.connectors.seatunnel.file.source.verify.VerifyFileMeta;
 
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.Serializable;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -66,6 +68,25 @@ public interface ReadStrategy extends Serializable, Closeable {
     void setCatalogTable(CatalogTable catalogTable);
 
     List<String> getFileNamesByPath(String path) throws IOException;
+
+    /**
+     * 校验文件解析结果：压缩包名称（不含目录） -> 元信息。
+     *
+     * <p>仅在 verify_file_enabled=true 且已调用过 {@link #getFileNamesByPath(String)} 之后才非空。 Enumerator 取出该映射，
+     * 把声明条数与 MD5 随 split 下发给 reader。
+     */
+    default Map<String, VerifyFileMeta> getVerifyFileMetaMap() {
+        return Collections.emptyMap();
+    }
+
+    /**
+     * 读取数据前的前置校验，目前用于 MD5 比对。
+     *
+     * <p>默认不做任何校验，由 {@code AbstractReadStrategy} 提供实现。
+     */
+    default void verifyBeforeRead(FileSourceSplit split) throws IOException {
+        // 默认无前置校验
+    }
 
     // todo: use ReadonlyConfig
     void setPluginConfig(Config pluginConfig);

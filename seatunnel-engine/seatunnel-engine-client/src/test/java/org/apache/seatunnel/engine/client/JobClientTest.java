@@ -59,6 +59,60 @@ public class JobClientTest {
         Assertions.assertEquals(900L, summary.getSinkCommittedCount());
     }
 
+    /** 发送数据量：source 侧开启校验文件解析后上报的 SourceSentCount 需要被正确读出。 */
+    @Test
+    public void testWithSourceSentCount() {
+        String metricsJson =
+                "{"
+                        + "\"SourceSentCount\": [{\"value\": 1000, \"name\": \"source1\"}],"
+                        + "\"SourceReceivedCount\": [{\"value\": 1000, \"name\": \"source1\"}],"
+                        + "\"SinkWriteCount\": [{\"value\": 1000, \"name\": \"sink1\"}],"
+                        + "\"SinkCommittedCount\": [{\"value\": 1000, \"name\": \"sink1\"}]"
+                        + "}";
+
+        when(hazelcastClient.requestOnMasterAndDecodeResponse(any(), any()))
+                .thenReturn(metricsJson);
+
+        JobMetricsRunner.JobMetricsSummary summary = jobClient.getJobMetricsSummary(123456L);
+
+        Assertions.assertEquals(1000L, summary.getSourceSentCount());
+        Assertions.assertEquals(1000L, summary.getSourceReadCount());
+    }
+
+    /** 多个 subtask 各自上报的发送数据量需要累加。 */
+    @Test
+    public void testSourceSentCountFromMultipleSubtasks() {
+        String metricsJson =
+                "{"
+                        + "\"SourceSentCount\": ["
+                        + "{\"value\": 600, \"name\": \"source1\"},"
+                        + "{\"value\": 400, \"name\": \"source2\"}"
+                        + "]"
+                        + "}";
+
+        when(hazelcastClient.requestOnMasterAndDecodeResponse(any(), any()))
+                .thenReturn(metricsJson);
+
+        JobMetricsRunner.JobMetricsSummary summary = jobClient.getJobMetricsSummary(123456L);
+
+        Assertions.assertEquals(1000L, summary.getSourceSentCount());
+    }
+
+    /** 未开启校验文件功能时该指标不存在，发送数据量应为 0 且不影响其他指标。 */
+    @Test
+    public void testSourceSentCountAbsent() {
+        String metricsJson =
+                "{" + "\"SourceReceivedCount\": [{\"value\": 1000, \"name\": \"source1\"}]" + "}";
+
+        when(hazelcastClient.requestOnMasterAndDecodeResponse(any(), any()))
+                .thenReturn(metricsJson);
+
+        JobMetricsRunner.JobMetricsSummary summary = jobClient.getJobMetricsSummary(123456L);
+
+        Assertions.assertEquals(0L, summary.getSourceSentCount());
+        Assertions.assertEquals(1000L, summary.getSourceReadCount());
+    }
+
     @Test
     public void testWithoutCommittedMetrics() {
         String metricsJson =

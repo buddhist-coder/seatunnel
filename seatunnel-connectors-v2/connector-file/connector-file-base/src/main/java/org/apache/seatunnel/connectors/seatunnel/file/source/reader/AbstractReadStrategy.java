@@ -38,9 +38,13 @@ import org.apache.seatunnel.connectors.seatunnel.file.config.FileFormat;
 import org.apache.seatunnel.connectors.seatunnel.file.config.FileSyncMode;
 import org.apache.seatunnel.connectors.seatunnel.file.config.FileUpdateStrategy;
 import org.apache.seatunnel.connectors.seatunnel.file.config.HadoopConf;
+import org.apache.seatunnel.connectors.seatunnel.file.config.VerifyMismatchAction;
+import org.apache.seatunnel.connectors.seatunnel.file.exception.FileConnectorErrorCode;
 import org.apache.seatunnel.connectors.seatunnel.file.exception.FileConnectorException;
 import org.apache.seatunnel.connectors.seatunnel.file.hadoop.HadoopFileSystemProxy;
 import org.apache.seatunnel.connectors.seatunnel.file.source.split.FileSourceSplit;
+import org.apache.seatunnel.connectors.seatunnel.file.source.verify.VerifyFileMeta;
+import org.apache.seatunnel.connectors.seatunnel.file.source.verify.VerifyFileParser;
 
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
@@ -60,18 +64,24 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -124,6 +134,28 @@ public abstract class AbstractReadStrategy implements ReadStrategy {
     protected transient boolean shareTargetFileSystemProxy;
     protected transient boolean checksumUnavailableWarned;
 
+    // ==================== 校验文件与「发送数据量」 ====================
+
+    protected boolean verifyFileEnabled = FileBaseSourceOptions.VERIFY_FILE_ENABLED.defaultValue();
+    protected String verifyFileSuffix = FileBaseSourceOptions.VERIFY_FILE_SUFFIX.defaultValue();
+    protected String verifyFileDelimiter =
+            FileBaseSourceOptions.VERIFY_FILE_DELIMITER.defaultValue();
+    protected int verifyFieldIndexName =
+            FileBaseSourceOptions.VERIFY_FIELD_INDEX_NAME.defaultValue();
+    protected int verifyFieldIndexCount =
+            FileBaseSourceOptions.VERIFY_FIELD_INDEX_COUNT.defaultValue();
+    protected int verifyFieldIndexMd5 = FileBaseSourceOptions.VERIFY_FIELD_INDEX_MD5.defaultValue();
+    protected boolean verifyMd5Enabled = FileBaseSourceOptions.VERIFY_MD5_ENABLED.defaultValue();
+    protected VerifyMismatchAction verifyMismatchAction =
+            FileBaseSourceOptions.VERIFY_ON_MISMATCH.defaultValue();
+
+    /**
+     * 校验文件解析结果：压缩包名称（不含目录） -> 元信息。
+     *
+     * <p>由 {@link #getFileNamesByPath(String)} 在扫描目录时填充，Enumerator 随后取出并随 split 下发给 reader。
+     */
+    protected final Map<String, VerifyFileMeta> verifyFileMetaMap = new LinkedHashMap<>();
+
     private static final class UpdateModeStats {
         private long scanned;
         private long skipped;
@@ -153,7 +185,8 @@ public abstract class AbstractReadStrategy implements ReadStrategy {
     public List<String> getFileNamesByPath(String path) throws IOException {
         ArrayList<String> fileNames = new ArrayList<>();
         UpdateModeStats updateModeStats = enableUpdateSync ? new UpdateModeStats() : null;
-        collectFileNamesByPath(path, fileNames, updateModeStats);
+        List<String> verifyFilePaths = verifyFileEnabled ? new ArrayList<>() : null;
+        collectFileNamesByPath(path, fileNames, updateModeStats, verifyFilePaths);
         if (updateModeStats != null) {
             log.info(
                     "Update sync mode statistics: scanned={}, skipped={}, to_sync={}",
@@ -161,11 +194,18 @@ public abstract class AbstractReadStrategy implements ReadStrategy {
                     updateModeStats.skipped,
                     updateModeStats.scanned - updateModeStats.skipped);
         }
+        if (verifyFileEnabled) {
+            loadVerifyFileMetas(verifyFilePaths);
+            return retainDeclaredFiles(fileNames);
+        }
         return fileNames;
     }
 
     private void collectFileNamesByPath(
-            String path, List<String> fileNames, UpdateModeStats updateModeStats)
+            String path,
+            List<String> fileNames,
+            UpdateModeStats updateModeStats,
+            List<String> verifyFilePaths)
             throws IOException {
         FileStatus[] stats = hadoopFileSystemProxy.listStatus(path);
         for (FileStatus fileStatus : stats) {
@@ -173,18 +213,29 @@ public abstract class AbstractReadStrategy implements ReadStrategy {
                 // skip hidden tmp directory, such as .hive-staging_hive
                 if (!fileStatus.getPath().getName().startsWith(".")) {
                     collectFileNamesByPath(
-                            fileStatus.getPath().toString(), fileNames, updateModeStats);
+                            fileStatus.getPath().toString(),
+                            fileNames,
+                            updateModeStats,
+                            verifyFilePaths);
                 }
                 continue;
             }
-            if (!fileStatus.isFile()
-                    || !filterFileByPattern(fileStatus)
-                    || fileStatus.getLen() <= 0) {
+            if (!fileStatus.isFile() || fileStatus.getLen() <= 0) {
+                continue;
+            }
+
+            String fileName = fileStatus.getPath().getName();
+            // 校验文件的识别放在所有数据文件过滤规则之前，
+            // 避免被 file_filter_pattern / filename_extension 等针对数据文件的规则挡掉
+            if (verifyFileEnabled && fileName.endsWith(verifyFileSuffix)) {
+                verifyFilePaths.add(fileStatus.getPath().toString());
+                continue;
+            }
+            if (!filterFileByPattern(fileStatus)) {
                 continue;
             }
 
             // filter '_SUCCESS' file and hidden files
-            String fileName = fileStatus.getPath().getName();
             if (fileName.equals("_SUCCESS")
                     || fileName.startsWith(".")
                     || !filterFileByModificationDate(fileStatus)) {
@@ -344,6 +395,8 @@ public abstract class AbstractReadStrategy implements ReadStrategy {
                     updateStrategy.name().toLowerCase(Locale.ROOT),
                     compareMode.name().toLowerCase(Locale.ROOT));
         }
+
+        parseVerifyFileConfig(pluginConfig);
     }
 
     @Override
@@ -959,5 +1012,251 @@ public abstract class AbstractReadStrategy implements ReadStrategy {
         throw new FileConnectorException(
                 SeaTunnelAPIErrorCode.CONFIG_VALIDATION_FAILED,
                 "Unsupported " + optionKey + ": [" + rawValue + "], supported: " + supported + ".");
+    }
+
+    /** 解析校验文件相关配置。总开关关闭时立即返回，保证对现有作业零行为变更。 */
+    private void parseVerifyFileConfig(Config pluginConfig) {
+        if (pluginConfig.hasPath(FileBaseSourceOptions.VERIFY_FILE_ENABLED.key())) {
+            verifyFileEnabled =
+                    pluginConfig.getBoolean(FileBaseSourceOptions.VERIFY_FILE_ENABLED.key());
+        }
+        if (!verifyFileEnabled) {
+            return;
+        }
+        if (pluginConfig.hasPath(FileBaseSourceOptions.VERIFY_FILE_SUFFIX.key())) {
+            verifyFileSuffix =
+                    pluginConfig.getString(FileBaseSourceOptions.VERIFY_FILE_SUFFIX.key()).trim();
+        }
+        requireNotBlank(verifyFileSuffix, FileBaseSourceOptions.VERIFY_FILE_SUFFIX.key());
+
+        if (pluginConfig.hasPath(FileBaseSourceOptions.VERIFY_FILE_DELIMITER.key())) {
+            verifyFileDelimiter =
+                    pluginConfig.getString(FileBaseSourceOptions.VERIFY_FILE_DELIMITER.key());
+        }
+        requireNotBlank(verifyFileDelimiter, FileBaseSourceOptions.VERIFY_FILE_DELIMITER.key());
+
+        verifyFieldIndexName =
+                readFieldIndex(
+                        pluginConfig,
+                        FileBaseSourceOptions.VERIFY_FIELD_INDEX_NAME.key(),
+                        verifyFieldIndexName);
+        if (verifyFieldIndexName < 0) {
+            throw new FileConnectorException(
+                    SeaTunnelAPIErrorCode.CONFIG_VALIDATION_FAILED,
+                    "Option '"
+                            + FileBaseSourceOptions.VERIFY_FIELD_INDEX_NAME.key()
+                            + "' must not be negative, the package name field is required for pairing.");
+        }
+        verifyFieldIndexCount =
+                readFieldIndex(
+                        pluginConfig,
+                        FileBaseSourceOptions.VERIFY_FIELD_INDEX_COUNT.key(),
+                        verifyFieldIndexCount);
+        verifyFieldIndexMd5 =
+                readFieldIndex(
+                        pluginConfig,
+                        FileBaseSourceOptions.VERIFY_FIELD_INDEX_MD5.key(),
+                        verifyFieldIndexMd5);
+
+        if (pluginConfig.hasPath(FileBaseSourceOptions.VERIFY_MD5_ENABLED.key())) {
+            verifyMd5Enabled =
+                    pluginConfig.getBoolean(FileBaseSourceOptions.VERIFY_MD5_ENABLED.key());
+        }
+        if (pluginConfig.hasPath(FileBaseSourceOptions.VERIFY_ON_MISMATCH.key())) {
+            verifyMismatchAction =
+                    parseEnumValue(
+                            VerifyMismatchAction.class,
+                            pluginConfig.getString(FileBaseSourceOptions.VERIFY_ON_MISMATCH.key()),
+                            FileBaseSourceOptions.VERIFY_ON_MISMATCH.key());
+        }
+        if (verifyMd5Enabled && verifyFieldIndexMd5 < 0) {
+            throw new FileConnectorException(
+                    SeaTunnelAPIErrorCode.CONFIG_VALIDATION_FAILED,
+                    "When verify_md5_enabled=true, verify_field_index_md5 must not be -1.");
+        }
+
+        log.info(
+                "Verify file enabled: suffix={}, delimiter={}, field_index(name/count/md5)={}/{}/{}, md5_enabled={}, on_mismatch={}",
+                verifyFileSuffix,
+                verifyFileDelimiter,
+                verifyFieldIndexName,
+                verifyFieldIndexCount,
+                verifyFieldIndexMd5,
+                verifyMd5Enabled,
+                verifyMismatchAction.name().toLowerCase(Locale.ROOT));
+    }
+
+    private static void requireNotBlank(String value, String optionKey) {
+        if (StringUtils.isBlank(value)) {
+            throw new FileConnectorException(
+                    SeaTunnelAPIErrorCode.CONFIG_VALIDATION_FAILED,
+                    "Option '"
+                            + optionKey
+                            + "' must not be blank when verify_file_enabled=true.");
+        }
+    }
+
+    private static int readFieldIndex(Config pluginConfig, String optionKey, int defaultValue) {
+        if (!pluginConfig.hasPath(optionKey)) {
+            return defaultValue;
+        }
+        int index = pluginConfig.getInt(optionKey);
+        if (index < VerifyFileParser.INDEX_ABSENT) {
+            throw new FileConnectorException(
+                    SeaTunnelAPIErrorCode.CONFIG_VALIDATION_FAILED,
+                    "Option '" + optionKey + "' must be >= -1, but got " + index + ".");
+        }
+        return index;
+    }
+
+    /** 读取并解析目录下全部校验文件，结果写入 {@link #verifyFileMetaMap}。 */
+    private void loadVerifyFileMetas(List<String> verifyFilePaths) throws IOException {
+        verifyFileMetaMap.clear();
+        if (verifyFilePaths == null || verifyFilePaths.isEmpty()) {
+            log.warn(
+                    "verify_file_enabled=true but no verify file matched suffix [{}], "
+                            + "so all data files will be skipped this round. Please check verify_file_suffix, "
+                            + "or whether the upstream has finished delivering.",
+                    verifyFileSuffix);
+            return;
+        }
+        for (String verifyFilePath : verifyFilePaths) {
+            String content = readVerifyFileContent(verifyFilePath);
+            List<VerifyFileMeta> metas =
+                    VerifyFileParser.parse(
+                            content,
+                            verifyFileDelimiter,
+                            verifyFieldIndexName,
+                            verifyFieldIndexCount,
+                            verifyFieldIndexMd5,
+                            verifyFilePath);
+            for (VerifyFileMeta meta : metas) {
+                VerifyFileMeta previous = verifyFileMetaMap.put(meta.getPackageName(), meta);
+                if (previous != null) {
+                    log.warn(
+                            "Package [{}] is declared more than once, the declaration in [{}] overrides the one in [{}].",
+                            meta.getPackageName(),
+                            verifyFilePath,
+                            previous.getVerifyFilePath());
+                }
+            }
+        }
+        log.info(
+                "Parsed {} verify file(s), {} package declaration(s) in total.",
+                verifyFilePaths.size(),
+                verifyFileMetaMap.size());
+    }
+
+    private String readVerifyFileContent(String verifyFilePath) throws IOException {
+        try (InputStream in = hadoopFileSystemProxy.getInputStream(verifyFilePath);
+                ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[4096];
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                out.write(buffer, 0, read);
+            }
+            return new String(out.toByteArray(), StandardCharsets.UTF_8);
+        }
+    }
+
+    /**
+     * 仅保留被校验文件声明过的数据文件。
+     *
+     * <p>未被声明的数据文件视为「上游尚未投放完成」，本轮跳过、等下一轮作业；已声明但实际不存在的，打告警后忽略。
+     */
+    private List<String> retainDeclaredFiles(List<String> scannedFileNames) {
+        List<String> declaredFileNames = new ArrayList<>(scannedFileNames.size());
+        List<String> skippedFileNames = new ArrayList<>();
+        for (String filePath : scannedFileNames) {
+            if (verifyFileMetaMap.containsKey(extractFileName(filePath))) {
+                declaredFileNames.add(filePath);
+            } else {
+                skippedFileNames.add(filePath);
+            }
+        }
+        if (!skippedFileNames.isEmpty()) {
+            log.info(
+                    "Skipped {} data file(s) without a matched verify file declaration, they will be read in a later run: {}",
+                    skippedFileNames.size(),
+                    skippedFileNames);
+        }
+        // 声明了但目录中不存在的压缩包，通常是清理时序造成的，告警后忽略，不中断作业
+        Set<String> declaredFileNameSet = new HashSet<>();
+        for (String filePath : declaredFileNames) {
+            declaredFileNameSet.add(extractFileName(filePath));
+        }
+        for (String packageName : verifyFileMetaMap.keySet()) {
+            if (!declaredFileNameSet.contains(packageName)) {
+                log.warn(
+                        "Package [{}] is declared by a verify file but not found in the scanned data files, ignored.",
+                        packageName);
+            }
+        }
+        // 同步修正实例级的 fileNames，getPathForPartitionInference 依赖它推断分区
+        this.fileNames.removeAll(skippedFileNames);
+        return declaredFileNames;
+    }
+
+    private static String extractFileName(String filePath) {
+        return VerifyFileParser.extractFileName(filePath);
+    }
+
+    /**
+     * 读取数据前的 MD5 前置校验，由 reader 在调用 read 之前触发。
+     *
+     * <p>未开启 MD5 校验或 split 未携带声明值时直接返回。校验不通过时按 verify_on_mismatch 决定是告警还是终止作业。
+     */
+    @Override
+    public void verifyBeforeRead(FileSourceSplit split) throws IOException {
+        if (!verifyMd5Enabled || split == null) {
+            return;
+        }
+        if (!split.hasExpectedMd5()) {
+            log.warn(
+                    "verify_md5_enabled=true but no MD5 is declared for file [{}], MD5 verification is skipped.",
+                    split.getFilePath());
+            return;
+        }
+        String actualMd5 = calculateFileMd5(split.getFilePath());
+        if (actualMd5.equalsIgnoreCase(split.getExpectedMd5())) {
+            log.info("MD5 verification passed for file [{}].", split.getFilePath());
+            return;
+        }
+        String message =
+                String.format(
+                        "MD5 mismatch for file [%s], declared=[%s], actual=[%s].",
+                        split.getFilePath(), split.getExpectedMd5(), actualMd5);
+        if (verifyMismatchAction == VerifyMismatchAction.FAIL) {
+            throw new FileConnectorException(FileConnectorErrorCode.FILE_READ_FAILED, message);
+        }
+        log.error("{} Because verify_on_mismatch=warn, the data will still be read.", message);
+    }
+
+    /** 完整读一遍文件原始字节计算 MD5，这也是开启该功能会带来双倍 IO 的原因。 */
+    private String calculateFileMd5(String filePath) throws IOException {
+        MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("MD5");
+        } catch (NoSuchAlgorithmException e) {
+            throw new IOException("MD5 algorithm is not available in current JVM.", e);
+        }
+        try (InputStream in = hadoopFileSystemProxy.getInputStream(filePath)) {
+            byte[] buffer = new byte[8 * 1024];
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                digest.update(buffer, 0, read);
+            }
+        }
+        StringBuilder hex = new StringBuilder(32);
+        for (byte b : digest.digest()) {
+            hex.append(Character.forDigit((b >> 4) & 0xF, 16));
+            hex.append(Character.forDigit(b & 0xF, 16));
+        }
+        return hex.toString();
+    }
+
+    @Override
+    public Map<String, VerifyFileMeta> getVerifyFileMetaMap() {
+        return Collections.unmodifiableMap(verifyFileMetaMap);
     }
 }
